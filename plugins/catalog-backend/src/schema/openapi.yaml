@@ -1,17 +1,31 @@
 openapi: 3.0.3
-
 info:
-  title: '@backstage/plugin-catalog-backend'
+  title: catalog
   version: '1'
-  description: The Backstage backend plugin that provides the Backstage catalog
+  description: |
+    The API surface consists of a few distinct groups of functionality. Each has a
+    dedicated section below.
+
+    > **Note:** This page only describes some of the most commonly used parts of the
+    > API, and is a work in progress.
+
+    All of the URL paths in this article are assumed to be on top of some base URL
+    pointing at your catalog installation. For example, if the path given in a
+    section below is `/entities`, and the catalog is located at
+    `http://localhost:7007/api/catalog` during local development, the full URL would
+    be `http://localhost:7007/api/catalog/entities`. The actual URL may vary from
+    one organization to the other, especially in production, but is commonly your
+    `backend.baseUrl` in your app config, plus `/api/catalog` at the end.
+
+    Some or all of the endpoints may accept or require an `Authorization` header
+    with a `Bearer` token, which should then be the Backstage token returned by the
+    [`identity API`](https://backstage.io/docs/reference/core-plugin-api.identityapiref).
   license:
     name: Apache-2.0
     url: http://www.apache.org/licenses/LICENSE-2.0.html
   contact: {}
-
 servers:
   - url: /
-
 components:
   examples: {}
   headers: {}
@@ -20,31 +34,58 @@ components:
       name: kind
       in: path
       required: true
+      allowReserved: true
       schema:
         type: string
     namespace:
       name: namespace
       in: path
       required: true
+      allowReserved: true
       schema:
         type: string
     name:
       name: name
       in: path
       required: true
+      allowReserved: true
       schema:
         type: string
     uid:
       name: uid
       in: path
       required: true
+      allowReserved: true
       schema:
         type: string
     cursor:
       name: cursor
       in: query
-      description: Cursor to a set page of results.
+      description: |
+        You may pass the `cursor` query parameters to perform cursor based pagination
+        through the set of entities. The value of `cursor` will be returned in the response, under the `pageInfo` property:
+
+        ```json
+          "pageInfo": {
+            "nextCursor": "a-cursor",
+            "prevCursor": "another-cursor"
+          }
+        ```
+
+        If `nextCursor` exists, it can be used to retrieve the next batch of entities. Following the same approach,
+        if `prevCursor` exists, it can be used to retrieve the previous batch of entities.
+
+        - [`filter`](#filtering), for selecting only a subset of all entities
+        - [`fields`](#field-selection), for selecting only parts of the full data
+          structure of each entity
+        - `limit` for limiting the number of entities returned (20 is the default)
+        - [`orderField`](#ordering), for deciding the order of the entities
+        - `fullTextFilter`
+          **NOTE**: [`filter`, `orderField`, `fullTextFilter`] and `cursor` are mutually exclusive. This means that,
+          it isn't possible to change any of [`filter`, `orderField`, `fullTextFilter`] when passing `cursor` as query parameters,
+          as changing any of these properties will affect pagination. If any of `filter`, `orderField`, `fullTextFilter` is specified together with `cursor`, only the latter is taken into consideration.
       required: false
+      allowReserved: true
       schema:
         type: string
         minLength: 1
@@ -53,33 +94,156 @@ components:
       in: query
       description: Pointer to the previous page of results.
       required: false
+      allowReserved: true
       schema:
         type: string
         minLength: 1
     fields:
       name: fields
       in: query
-      description: Restrict to just these fields in the response.
+      description: |
+        By default the full entities are returned, but you can pass in a `fields` query
+        parameter which selects what parts of the entity data to retain. This makes the
+        response smaller and faster to transfer, and may allow the catalog to perform
+        more efficient queries.
+
+        The query parameter value is a comma separated list of simplified JSON paths
+        like above. Each path corresponds to the key of either a value, or of a subtree
+        root that you want to keep in the output. The rest is pruned away. For example,
+        specifying `?fields=metadata.name,metadata.annotations,spec` retains only the
+        `name` and `annotations` fields of the `metadata` of each entity (it'll be an
+        object with at most two keys), keeps the entire `spec` unchanged, and cuts out
+        all other roots such as `relations`.
+
+        Some more real world usable examples:
+
+        - Return only enough data to form the full ref of each entity:
+
+          `/entities/by-query?fields=kind,metadata.namespace,metadata.name`
+      required: false
+      allowReserved: true
+      explode: false
+      schema:
+        type: array
+        items:
+          type: string
+      examples:
+        Get name and the entire relations collection:
+          value:
+            - metadata.name
+            - relations
+        Get kind, name and namespace:
+          value:
+            - kind
+            - metadata.name
+            - metadata.namespace
+    filter:
+      name: filter
+      in: query
+      description: |
+        You can pass in one or more filter sets that get matched against each entity.
+        Each filter set is a number of conditions that all have to match for the
+        condition to be true (conditions effectively have an AND between them). At least
+        one filter set has to be true for the entity to be part of the result set
+        (filter sets effectively have an OR between them).
+
+        Example:
+
+        ```text
+        /entities/by-query?filter=kind=user,metadata.namespace=default&filter=kind=group,spec.type
+
+          Return entities that match
+
+            Filter set 1:
+              Condition 1: kind = user
+                          AND
+              Condition 2: metadata.namespace = default
+
+            OR
+
+            Filter set 2:
+              Condition 1: kind = group
+                          AND
+              Condition 2: spec.type exists
+        ```
+
+        Each condition is either on the form `<key>`, or on the form `<key>=<value>`.
+        The first form asserts on the existence of a certain key (with any value), and
+        the second asserts that the key exists and has a certain value. All checks are
+        always case _insensitive_.
+
+        In all cases, the key is a simplified JSON path in a given piece of entity data.
+        Each part of the path is a key of an object, and the traversal also descends
+        through arrays. There are two special forms:
+
+        - Array items that are simple value types (such as strings) match on a key-value
+          pair where the key is the item as a string, and the value is the string `true`
+        - Relations can be matched on a `relations.<type>=<targetRef>` form
+
+        Let's look at a simplified example to illustrate the concept:
+
+        ```json
+        {
+          "a": {
+            "b": ["c", { "d": 1 }],
+            "e": 7
+          }
+        }
+        ```
+
+        This would match any one of the following conditions:
+
+        - `a`
+        - `a.b`
+        - `a.b.c`
+        - `a.b.c=true`
+        - `a.b.d`
+        - `a.b.d=1`
+        - `a.e`
+        - `a.e=7`
+
+        Some more real world usable examples:
+
+        - Return all orphaned entities:
+
+          `/entities/by-query?filter=metadata.annotations.backstage.io/orphan=true`
+
+        - Return all users and groups:
+
+          `/entities/by-query?filter=kind=user&filter=kind=group`
+
+        - Return all service components:
+
+          `/entities/by-query?filter=kind=component,spec.type=service`
+
+        - Return all entities with the `java` tag:
+
+          `/entities/by-query?filter=metadata.tags.java`
+
+        - Return all users who are members of the `ops` group (note that the full
+          [reference](references.md) of the group is used):
+
+          `/entities/by-query?filter=kind=user,relations.memberof=group:default/ops`
+
       required: false
       allowReserved: true
       schema:
         type: array
         items:
           type: string
-    filter:
-      name: filter
-      in: query
-      description: Filter for just the entities defined by this filter.
-      required: false
-      schema:
-        type: array
-        items:
-          type: string
+      examples:
+        Get groups:
+          value:
+            - kind=group
+        Get orphaned components:
+          value:
+            - kind=component,metadata.annotations.backstage.io/orphan=true
     offset:
       name: offset
       in: query
       description: Number of records to skip in the query page.
       required: false
+      allowReserved: true
       schema:
         type: integer
         minimum: 0
@@ -88,13 +252,23 @@ components:
       in: query
       description: Number of records to return in the response.
       required: false
+      allowReserved: true
       schema:
         type: integer
-        minimum: 1
+        minimum: 0
     orderField:
       name: orderField
       in: query
-      description: The fields to sort returned results by.
+      description: |
+        By default the entities are returned ordered by their internal uid. You can
+        customize the `orderField` query parameters to affect that ordering.
+
+        For example, to return entities by their name:
+
+        `/entities/by-query?orderField=metadata.name,asc`
+
+        Each parameter can be followed by `asc` for ascending lexicographical order or
+        `desc` for descending (reverse) lexicographical order.
       required: false
       allowReserved: true
       schema:
@@ -104,13 +278,65 @@ components:
           description: A two-item tuple of [field, order].
       explode: true
       style: form
+      examples:
+        Order ascending by name:
+          value:
+            - metadata.name,asc
+        Order descending by owner:
+          value:
+            - spec.owner,desc
   requestBodies: {}
-  responses: {}
+  responses:
+    ErrorResponse:
+      description: An error response from the backend.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
   schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            name:
+              type: string
+            message:
+              type: string
+            stack:
+              type: string
+            code:
+              type: string
+          required:
+            - name
+            - message
+        request:
+          type: object
+          properties:
+            method:
+              type: string
+            url:
+              type: string
+          required:
+            - method
+            - url
+        response:
+          type: object
+          properties:
+            statusCode:
+              type: number
+          required:
+            - statusCode
+      required:
+        - error
+        - response
+      additionalProperties: {}
     JsonObject:
       type: object
       properties: {}
       description: A type representing all allowed JSON object values.
+      additionalProperties: {}
     MapStringString:
       type: object
       properties: {}
@@ -137,82 +363,80 @@ components:
       description: A link to external information that is related to the entity.
       additionalProperties: false
     EntityMeta:
-      allOf:
-        - $ref: '#/components/schemas/JsonObject'
-        - type: object
-          properties:
-            links:
-              type: array
-              items:
-                $ref: '#/components/schemas/EntityLink'
-              description: A list of external hyperlinks related to the entity.
-            tags:
-              type: array
-              items:
-                type: string
-              description: |-
-                A list of single-valued strings, to for example classify catalog entities in
-                various ways.
-            annotations:
-              $ref: '#/components/schemas/MapStringString'
-            labels:
-              $ref: '#/components/schemas/MapStringString'
-            description:
-              type: string
-              description: |-
-                A short (typically relatively few words, on one line) description of the
-                entity.
-            title:
-              type: string
-              description: |-
-                A display name of the entity, to be presented in user interfaces instead
-                of the `name` property above, when available.
-                This field is sometimes useful when the `name` is cumbersome or ends up
-                being perceived as overly technical. The title generally does not have
-                as stringent format requirements on it, so it may contain special
-                characters and be more explanatory. Do keep it very short though, and
-                avoid situations where a title can be confused with the name of another
-                entity, or where two entities share a title.
-                Note that this is only for display purposes, and may be ignored by some
-                parts of the code. Entity references still always make use of the `name`
-                property, not the title.
-            namespace:
-              type: string
-              description: The namespace that the entity belongs to.
-            name:
-              type: string
-              description: |-
-                The name of the entity.
-                Must be unique within the catalog at any given point in time, for any
-                given namespace + kind pair. This value is part of the technical
-                identifier of the entity, and as such it will appear in URLs, database
-                tables, entity references, and similar. It is subject to restrictions
-                regarding what characters are allowed.
-                If you want to use a different, more human readable string with fewer
-                restrictions on it in user interfaces, see the `title` field below.
-            etag:
-              type: string
-              description: |-
-                An opaque string that changes for each update operation to any part of
-                the entity, including metadata.
-                This field can not be set by the user at creation time, and the server
-                will reject an attempt to do so. The field will be populated in read
-                operations. The field can (optionally) be specified when performing
-                update or delete operations, and the server will then reject the
-                operation if it does not match the current stored value.
-            uid:
-              type: string
-              description: |-
-                A globally unique ID for the entity.
-                This field can not be set by the user at creation time, and the server
-                will reject an attempt to do so. The field will be populated in read
-                operations. The field can (optionally) be specified when performing
-                update or delete operations, but the server is free to reject requests
-                that do so in such a way that it breaks semantics.
-          required:
-            - name
+      type: object
+      properties:
+        links:
+          type: array
+          items:
+            $ref: '#/components/schemas/EntityLink'
+          description: A list of external hyperlinks related to the entity.
+        tags:
+          type: array
+          items:
+            type: string
+          description: |-
+            A list of single-valued strings, to for example classify catalog entities in
+            various ways.
+        annotations:
+          $ref: '#/components/schemas/MapStringString'
+        labels:
+          $ref: '#/components/schemas/MapStringString'
+        description:
+          type: string
+          description: |-
+            A short (typically relatively few words, on one line) description of the
+            entity.
+        title:
+          type: string
+          description: |-
+            A display name of the entity, to be presented in user interfaces instead
+            of the `name` property above, when available.
+            This field is sometimes useful when the `name` is cumbersome or ends up
+            being perceived as overly technical. The title generally does not have
+            as stringent format requirements on it, so it may contain special
+            characters and be more explanatory. Do keep it very short though, and
+            avoid situations where a title can be confused with the name of another
+            entity, or where two entities share a title.
+            Note that this is only for display purposes, and may be ignored by some
+            parts of the code. Entity references still always make use of the `name`
+            property, not the title.
+        namespace:
+          type: string
+          description: The namespace that the entity belongs to.
+        name:
+          type: string
+          description: |-
+            The name of the entity.
+            Must be unique within the catalog at any given point in time, for any
+            given namespace + kind pair. This value is part of the technical
+            identifier of the entity, and as such it will appear in URLs, database
+            tables, entity references, and similar. It is subject to restrictions
+            regarding what characters are allowed.
+            If you want to use a different, more human readable string with fewer
+            restrictions on it in user interfaces, see the `title` field below.
+        etag:
+          type: string
+          description: |-
+            An opaque string that changes for each update operation to any part of
+            the entity, including metadata.
+            This field can not be set by the user at creation time, and the server
+            will reject an attempt to do so. The field will be populated in read
+            operations. The field can (optionally) be specified when performing
+            update or delete operations, and the server will then reject the
+            operation if it does not match the current stored value.
+        uid:
+          type: string
+          description: |-
+            A globally unique ID for the entity.
+            This field can not be set by the user at creation time, and the server
+            will reject an attempt to do so. The field will be populated in read
+            operations. The field can (optionally) be specified when performing
+            update or delete operations, but the server is free to reject requests
+            that do so in such a way that it breaks semantics.
+      required:
+        - name
       description: Metadata fields common to all versions/kinds of entity.
-      additionalProperties: true
+      additionalProperties: {}
     EntityRelation:
       type: object
       properties:
@@ -252,7 +476,6 @@ components:
         - kind
         - apiVersion
       description: The parts of the format that's common to all versions/kinds of entity.
-      additionalProperties: true
     NullableEntity:
       type: object
       properties:
@@ -278,7 +501,6 @@ components:
         - kind
         - apiVersion
       description: The parts of the format that's common to all versions/kinds of entity.
-      additionalProperties: true
       nullable: true
     EntityAncestryResponse:
       type: object
@@ -309,8 +531,7 @@ components:
         items:
           type: array
           items:
-            anyOf:
-              - $ref: '#/components/schemas/NullableEntity'
+            $ref: '#/components/schemas/NullableEntity'
           description: |-
             The list of entities, in the same order as the refs in the request. Entries
             that are null signify that no entity existed with that ref.
@@ -324,8 +545,10 @@ components:
           type: string
         count:
           type: number
+      required:
+        - value
+        - count
       additionalProperties: false
-
     EntityFacetsResponse:
       type: object
       properties:
@@ -568,28 +791,6 @@ components:
         - type
         - target
       additionalProperties: false
-    SerializedError:
-      allOf:
-        - $ref: '#/components/schemas/JsonObject'
-        - type: object
-          properties:
-            code:
-              type: string
-              description: A custom code (not necessarily the same as an HTTP response code); may not be present
-            stack:
-              type: string
-              description: A stringified stack trace; may not be present
-            message:
-              type: string
-              description: The message of the exception that was thrown
-            name:
-              type: string
-              description: The name of the exception that was thrown
-          required:
-            - message
-            - name
-      description: The serialized form of an Error.
-      additionalProperties: false
     EntitiesQueryResponse:
       type: object
       properties:
@@ -597,8 +798,7 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/Entity'
-          description: |-
-            The list of entities paginated by a specific filter.
+          description: The list of entities paginated by a specific filter.
         totalItems:
           type: number
         pageInfo:
@@ -606,12 +806,14 @@ components:
           properties:
             nextCursor:
               type: string
-              description: |-
-                The cursor for the next batch of entities.
+              description: The cursor for the next batch of entities.
             prevCursor:
               type: string
-              description: |-
-                The cursor for the previous batch of entities.
+              description: The cursor for the previous batch of entities.
+      required:
+        - items
+        - totalItems
+        - pageInfo
       additionalProperties: false
   securitySchemes:
     JWT:
@@ -622,10 +824,16 @@ paths:
   /refresh:
     post:
       operationId: RefreshEntity
+      tags:
+        - Entity
       description: Refresh the entity related to entityRef.
       responses:
         '200':
           description: Refreshed
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        default:
+          $ref: '#/components/responses/ErrorResponse'
       security:
         - {}
         - JWT: []
@@ -649,6 +857,8 @@ paths:
   /entities:
     get:
       operationId: GetEntities
+      tags:
+        - Entity
       description: Get all entities matching a given filter.
       responses:
         '200':
@@ -659,6 +869,10 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/Entity'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        default:
+          $ref: '#/components/responses/ErrorResponse'
       security:
         - {}
         - JWT: []
@@ -668,9 +882,19 @@ paths:
         - $ref: '#/components/parameters/filter'
         - $ref: '#/components/parameters/offset'
         - $ref: '#/components/parameters/after'
+        - name: order
+          in: query
+          allowReserved: true
+          required: false
+          schema:
+            type: array
+            items:
+              type: string
   /entities/by-uid/{uid}:
     get:
       operationId: GetEntityByUid
+      tags:
+        - Entity
       description: Get a single entity by the UID.
       responses:
         '200':
@@ -679,6 +903,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Entity'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        default:
+          $ref: '#/components/responses/ErrorResponse'
       security:
         - {}
         - JWT: []
@@ -686,10 +914,16 @@ paths:
         - $ref: '#/components/parameters/uid'
     delete:
       operationId: DeleteEntityByUid
+      tags:
+        - Entity
       description: Delete a single entity by UID.
       responses:
         '204':
           description: Deleted successfully.
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        default:
+          $ref: '#/components/responses/ErrorResponse'
       security:
         - {}
         - JWT: []
@@ -698,6 +932,8 @@ paths:
   /entities/by-name/{kind}/{namespace}/{name}:
     get:
       operationId: GetEntityByName
+      tags:
+        - Entity
       description: Get an entity by an entity ref.
       responses:
         '200':
@@ -706,6 +942,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Entity'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        default:
+          $ref: '#/components/responses/ErrorResponse'
       security:
         - {}
         - JWT: []
@@ -716,6 +956,8 @@ paths:
   /entities/by-name/{kind}/{namespace}/{name}/ancestry:
     get:
       operationId: GetEntityAncestryByName
+      tags:
+        - Entity
       description: Get an entity's ancestry by entity ref.
       responses:
         '200':
@@ -724,6 +966,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/EntityAncestryResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        default:
+          $ref: '#/components/responses/ErrorResponse'
       security:
         - {}
         - JWT: []
@@ -734,6 +980,8 @@ paths:
   /entities/by-refs:
     post:
       operationId: GetEntitiesByRefs
+      tags:
+        - Entity
       description: Get a batch set of entities given an array of entityRefs.
       responses:
         '200':
@@ -742,13 +990,15 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/EntitiesBatchResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        default:
+          $ref: '#/components/responses/ErrorResponse'
       security:
         - {}
         - JWT: []
-      parameters:
-        - $ref: '#/components/parameters/fields'
       requestBody:
-        required: true
+        required: false
         content:
           application/json:
             schema:
@@ -764,9 +1014,25 @@ paths:
                   type: array
                   items:
                     type: string
+            examples:
+              Fetch Backstage entities:
+                value:
+                  entityRefs:
+                    - component:default/backstage
+                    - api:default/backstage
+              Fetch annotations for backstage entity:
+                value:
+                  entityRefs:
+                    - component:default/backstage
+                  fields:
+                    - metadata.annotations
+      parameters:
+        - $ref: '#/components/parameters/filter'
   /entities/by-query:
     get:
       operationId: GetEntitiesByQuery
+      tags:
+        - Entity
       description: Search for entities by a given query.
       responses:
         '200':
@@ -775,12 +1041,17 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/EntitiesQueryResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        default:
+          $ref: '#/components/responses/ErrorResponse'
       security:
         - {}
         - JWT: []
       parameters:
         - $ref: '#/components/parameters/fields'
         - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
         - $ref: '#/components/parameters/orderField'
         - $ref: '#/components/parameters/cursor'
         - $ref: '#/components/parameters/filter'
@@ -788,12 +1059,14 @@ paths:
           in: query
           description: Text search term.
           required: false
+          allowReserved: true
           schema:
             type: string
         - name: fullTextFilterFields
           in: query
           description: A comma separated list of fields to sort returned results by.
           required: false
+          allowReserved: true
           schema:
             type: array
             items:
@@ -803,6 +1076,8 @@ paths:
   /entity-facets:
     get:
       operationId: GetEntityFacets
+      tags:
+        - Entity
       description: Get all entity facets that match the given filters.
       responses:
         '200':
@@ -811,6 +1086,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/EntityFacetsResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        default:
+          $ref: '#/components/responses/ErrorResponse'
       security:
         - {}
         - JWT: []
@@ -818,16 +1097,28 @@ paths:
         - in: query
           name: facet
           required: true
+          allowReserved: true
           schema:
-            type: string
+            type: array
+            items:
+              type: string
+          examples:
+            Entities by kind:
+              value:
+                - kind
+            Entities by spec type:
+              value:
+                - spec.type
         - $ref: '#/components/parameters/filter'
   /locations:
     post:
       operationId: CreateLocation
+      tags:
+        - Locations
       description: Create a location for a given target.
       responses:
-        '200':
-          description: Ok
+        '201':
+          description: Created
           content:
             application/json:
               schema:
@@ -844,6 +1135,10 @@ paths:
                 required:
                   - entities
                   - location
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        default:
+          $ref: '#/components/responses/ErrorResponse'
       security:
         - {}
         - JWT: []
@@ -851,6 +1146,7 @@ paths:
         - in: query
           name: dryRun
           required: false
+          allowReserved: true
           schema:
             type: string
       requestBody:
@@ -869,6 +1165,8 @@ paths:
                 - type
     get:
       operationId: GetLocations
+      tags:
+        - Locations
       description: Get all locations
       responses:
         '200':
@@ -884,6 +1182,8 @@ paths:
                       $ref: '#/components/schemas/Location'
                   required:
                     - data
+        default:
+          $ref: '#/components/responses/ErrorResponse'
       security:
         - {}
         - JWT: []
@@ -891,6 +1191,8 @@ paths:
   /locations/{id}:
     get:
       operationId: GetLocation
+      tags:
+        - Locations
       description: Get a location by id.
       responses:
         '200':
@@ -899,6 +1201,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Location'
+        default:
+          $ref: '#/components/responses/ErrorResponse'
       security:
         - {}
         - JWT: []
@@ -906,14 +1210,21 @@ paths:
         - in: path
           name: id
           required: true
+          allowReserved: true
           schema:
             type: string
     delete:
       operationId: DeleteLocation
+      tags:
+        - Locations
       description: Delete a location by id.
       responses:
         '204':
           description: No content
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        default:
+          $ref: '#/components/responses/ErrorResponse'
       security:
         - {}
         - JWT: []
@@ -921,11 +1232,51 @@ paths:
         - in: path
           name: id
           required: true
+          allowReserved: true
+          schema:
+            type: string
+  /locations/by-entity/{kind}/{namespace}/{name}:
+    get:
+      operationId: getLocationByEntity
+      tags:
+        - Locations
+      description: Get a location for entity.
+      responses:
+        '200':
+          description: Ok
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Location'
+        default:
+          $ref: '#/components/responses/ErrorResponse'
+      security:
+        - {}
+        - JWT: []
+      parameters:
+        - in: path
+          name: kind
+          required: true
+          allowReserved: true
+          schema:
+            type: string
+        - in: path
+          name: namespace
+          required: true
+          allowReserved: true
+          schema:
+            type: string
+        - in: path
+          name: name
+          required: true
+          allowReserved: true
           schema:
             type: string
   /analyze-location:
     post:
       operationId: AnalyzeLocation
+      tags:
+        - Locations
       description: Validate a given location.
       responses:
         '200':
@@ -934,6 +1285,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/AnalyzeLocationResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        default:
+          $ref: '#/components/responses/ErrorResponse'
       security:
         - {}
         - JWT: []
@@ -950,33 +1305,38 @@ paths:
                 location:
                   $ref: '#/components/schemas/LocationInput'
               required:
-                - catalogFileName
                 - location
   /validate-entity:
     post:
       operationId: ValidateEntity
+      tags:
+        - Entity
       description: Validate that a passed in entity has no errors in schema.
       responses:
         '200':
           description: Ok
+        '400':
+          description: Validation errors.
           content:
             application/json:
               schema:
-                anyOf:
-                  - type: object
-                    properties:
-                      errors:
-                        $ref: '#/components/schemas/SerializedError'
-                    required:
-                      - errors
-                  - type: object
-                    properties:
-                      errors:
-                        type: array
-                        items:
-                          $ref: '#/components/schemas/SerializedError'
-                    required:
-                      - errors
+                type: object
+                properties:
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                        message:
+                          type: string
+                      required:
+                        - name
+                        - message
+                      additionalProperties: {}
+                required:
+                  - errors
       security:
         - {}
         - JWT: []
@@ -992,7 +1352,7 @@ paths:
                   type: string
                 entity:
                   type: object
-                  additionalProperties: true
+                  additionalProperties: {}
               required:
                 - location
                 - entity
